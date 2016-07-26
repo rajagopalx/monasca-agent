@@ -1,4 +1,4 @@
-# (C) Copyright 2015,2016 Hewlett Packard Enterprise Development Company LP
+# (C) Copyright 2015-2016 Hewlett Packard Enterprise Development Company LP
 """ Aggregation classes used by the collector and statsd to batch messages sent to the forwarder.
 """
 import json
@@ -51,8 +51,10 @@ class MetricsAggregator(object):
     """A metric aggregator class."""
 
     def __init__(self, hostname, recent_point_threshold=None):
+        self.events = []
         self.total_count = 0
         self.count = 0
+        self.event_count = 0
         self.hostname = hostname
 
         recent_point_threshold = recent_point_threshold or RECENT_POINT_THRESHOLD_DEFAULT
@@ -60,6 +62,40 @@ class MetricsAggregator(object):
         self.num_discarded_old_points = 0
 
         self.metrics = {}
+
+    def event(
+            self,
+            title,
+            text,
+            date_happened=None,
+            alert_type=None,
+            aggregation_key=None,
+            source_type_name=None,
+            priority=None,
+            dimensions=None,
+            hostname=None):
+        event = {'msg_title': title,
+                 'msg_text': text}
+        if date_happened is not None:
+            event['timestamp'] = date_happened
+        else:
+            event['timestamp'] = int(time())
+        if alert_type is not None:
+            event['alert_type'] = alert_type
+        if aggregation_key is not None:
+            event['aggregation_key'] = aggregation_key
+        if source_type_name is not None:
+            event['source_type_name'] = source_type_name
+        if priority is not None:
+            event['priority'] = priority
+        if dimensions is not None:
+            event['dimensions'] = dimensions
+        if hostname is not None:
+            event['host'] = hostname
+        else:
+            event['host'] = self.hostname
+
+        self.events.append(event)
 
     def flush(self):
         timestamp = time()
@@ -85,6 +121,17 @@ class MetricsAggregator(object):
         self.count = 0
         return metrics
 
+    def flush_events(self):
+        events = self.events
+        self.events = []
+
+        self.total_count += self.event_count
+        self.event_count = 0
+
+        log.debug("Received {0} events since last flush".format(len(events)))
+
+        return events
+
     def get_hostname_to_post(self, hostname):
         if 'SUPPRESS' == hostname:
             return None
@@ -97,11 +144,13 @@ class MetricsAggregator(object):
            (metric, timestamp, value, {"dimensions": {"name1": "value1", "name2": "value2"}, ...})
            dimensions should be a dictionary
         """
-        if 'hostname' not in dimensions and hostname:
+        if 'hostname' not in dimensions and hostname and 'resource_name' not in dimensions:
             dimensions.update({'hostname': hostname})
+		if 'resource_name' in dimensions:
+			dimensions.update({'servername': hostname})
         if device_name:
             dimensions.update({'device': device_name})
-
+	log.warn(dimensions)
         return metrics_pkg.Measurement(metric,
                                        int(timestamp),
                                        value,
