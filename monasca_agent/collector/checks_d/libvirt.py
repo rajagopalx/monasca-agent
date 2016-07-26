@@ -1,6 +1,6 @@
 #!/bin/env python
 
-# (c) Copyright 2014-2016 Hewlett Packard Enterprise Development LP
+# (c) Copyright 2014-2016 Hewlett Packard Enterprise Development Company LP
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -22,14 +22,18 @@ import os
 import stat
 import subprocess
 import time
+import logging
 
 from calendar import timegm
 from copy import deepcopy
 from datetime import datetime
 from datetime import timedelta
+from distutils.version import LooseVersion
 from monasca_agent.collector.checks import AgentCheck
 from monasca_agent.collector.virt import inspector
 from netaddr import all_matching_cidrs
+
+log = logging.getLogger(__name__)
 
 DOM_STATES = {libvirt.VIR_DOMAIN_BLOCKED: 'VM is blocked',
               libvirt.VIR_DOMAIN_CRASHED: 'VM has crashed',
@@ -125,8 +129,7 @@ class LibvirtCheck(AgentCheck):
                                password=self.init_config.get('admin_password'),
                                tenant_name=self.init_config.get('admin_tenant_name'),
                                auth_url=self.init_config.get('identity_uri'),
-                               endpoint_type='internalURL',
-                               region_name=self.init_config.get('region_name'))
+                               endpoint_type='internalURL')
             port_cache = nu.list_ports()['ports']
             # Finding existing network namespaces is an indication that either
             # DVR agent_mode is enabled, or this is all-in-one (like devstack)
@@ -279,8 +282,9 @@ class LibvirtCheck(AgentCheck):
         except IOError as e:
             self.log.error("Cannot write to {0}: {1}".format(self.metric_cache_file, e))
 
-    def _inspect_network(self, insp, inst, inst_name, instance_cache, metric_cache, dims_customer, dims_operations):
+    def _inspect_network(self, insp, inst, instance_cache, metric_cache, dims_customer, dims_operations):
         """Inspect network metrics for an instance"""
+        inst_name = inst.name()
         for vnic in insp.inspect_vnics(inst):
             sample_time = time.time()
             vnic_dimensions = {'device': vnic[0].name}
@@ -322,8 +326,7 @@ class LibvirtCheck(AgentCheck):
                     this_dimensions.update(dims_customer)
                     self.gauge(rate_name, rate_value,
                                dimensions=this_dimensions,
-                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                               hostname=instance_cache.get(inst_name)['hostname'])
+                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
                     # Operations (metric name prefixed with "vm."
                     this_dimensions = vnic_dimensions.copy()
                     this_dimensions.update(dims_operations)
@@ -339,8 +342,7 @@ class LibvirtCheck(AgentCheck):
                 this_dimensions.update(dims_customer)
                 self.gauge(mapped_name, weighted_value,
                            dimensions=this_dimensions,
-                           delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                           hostname=instance_cache.get(inst_name)['hostname'])
+                           delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
                 # Operations (metric name prefixed with "vm.")
                 this_dimensions = vnic_dimensions.copy()
                 this_dimensions.update(dims_operations)
@@ -351,13 +353,13 @@ class LibvirtCheck(AgentCheck):
                     'timestamp': sample_time,
                     'value': value}
 
-    def _inspect_cpu(self, insp, inst, inst_name, instance_cache, metric_cache, dims_customer, dims_operations):
+    def _inspect_cpu(self, insp, inst, instance_cache, metric_cache, dims_customer, dims_operations):
         """Inspect cpu metrics for an instance"""
 
+        inst_name = inst.name()
         sample_time = float("{:9f}".format(time.time()))
-        cpu_info = insp.inspect_cpus(inst)
-
         if 'cpu.time' in metric_cache[inst_name]:
+            cpu_info = insp.inspect_cpus(inst)
             # I have a prior value, so calculate the raw_perc & push the metric
             cpu_diff = cpu_info.time - metric_cache[inst_name]['cpu.time']['value']
             time_diff = sample_time - float(metric_cache[inst_name]['cpu.time']['timestamp'])
@@ -369,7 +371,7 @@ class LibvirtCheck(AgentCheck):
                 # Bad value, save current reading and skip
                 self.log.warn("Ignoring negative CPU sample for: "
                               "{0} new cpu time: {1} old cpu time: {2}"
-                              .format(inst_name, cpu_info.time,
+                              .format(inst_name, insp.inspect_cpus(inst).time,
                                       metric_cache[inst_name]['cpu.time']['value']))
                 metric_cache[inst_name]['cpu.time'] = {'timestamp': sample_time,
                                                        'value': cpu_info.time}
@@ -377,32 +379,24 @@ class LibvirtCheck(AgentCheck):
 
             self.gauge('cpu.utilization_perc', int(round(raw_perc, 0)),
                        dimensions=dims_customer,
-                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                       hostname=instance_cache.get(inst_name)['hostname'])
+                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
             self.gauge('cpu.utilization_norm_perc', int(round(normalized_perc, 0)),
                        dimensions=dims_customer,
-                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                       hostname=instance_cache.get(inst_name)['hostname'])
+                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
             self.gauge('vm.cpu.utilization_perc', int(round(raw_perc, 0)),
                        dimensions=dims_operations)
             self.gauge('vm.cpu.utilization_norm_perc', int(round(normalized_perc, 0)),
                        dimensions=dims_operations)
-
-            cpu_time_name = 'cpu.time_ns'
-            # cpu.time_ns for owning tenant
-            self.gauge(cpu_time_name, cpu_info.time,
-                       dimensions=dims_customer,
-                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                       hostname=instance_cache.get(inst_name)['hostname'])
-            # vm..cpu.time_ns for operations tenant
-            self.gauge("vm.{0}".format(cpu_time_name), cpu_info.time,
+            self.gauge('vm.cpu.time_ns', insp.inspect_cpus(inst).time,
                        dimensions=dims_operations)
-        metric_cache[inst_name]['cpu.time'] = {'timestamp': sample_time,
-                                               'value': cpu_info.time}
 
-    def _inspect_disks(self, insp, inst, inst_name, instance_cache, metric_cache, dims_customer, dims_operations):
+        metric_cache[inst_name]['cpu.time'] = {'timestamp': sample_time,
+                                               'value': insp.inspect_cpus(inst).time}
+
+    def _inspect_disks(self, insp, inst, instance_cache, metric_cache, dims_customer, dims_operations):
         """Inspect disk metrics for an instance"""
 
+        inst_name = inst.name()
         metric_aggregate = {}
         for disk in insp.inspect_disks(inst):
             sample_time = time.time()
@@ -438,12 +432,7 @@ class LibvirtCheck(AgentCheck):
                     this_dimensions = disk_dimensions.copy()
                     this_dimensions.update(dims_customer)
                     self.gauge(rate_name, rate_value, dimensions=this_dimensions,
-                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                               hostname=instance_cache.get(inst_name)['hostname'])
-                    self.gauge(metric_name, value, dimensions=this_dimensions,
-                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                               hostname=instance_cache.get(inst_name)['hostname'])
-
+                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
                     # Operations (metric name prefixed with "vm."
                     this_dimensions = disk_dimensions.copy()
                     this_dimensions.update(dims_operations)
@@ -456,54 +445,46 @@ class LibvirtCheck(AgentCheck):
                     'timestamp': sample_time,
                     'value': value}
 
-        if self.init_config.get('vm_extended_disks_check_enable'):
-            this_dimensions = dict()
-            this_dimensions.update(dims_customer)
-            this_dimensions.update(dims_operations)
-            for metric in metric_aggregate:
-                sample_time = time.time()
-                rate_name = "{0}_total_sec".format(metric)
-                if rate_name not in metric_cache[inst_name]:
-                    metric_cache[inst_name][rate_name] = {}
-                else:
-                    last_update_time = metric_cache[inst_name][
-                        rate_name]['timestamp']
-                    time_diff = sample_time - float(last_update_time)
-                    rate_value = self._calculate_rate(metric_aggregate[metric],
-                                                      metric_cache[inst_name][rate_name]['value'],
-                                                      time_diff)
-                    if rate_value < 0:
-                        # Bad value, save current reading and skip
-                        self.log.warn("Ignoring negative disk sample for: "
-                                      "{0} new value: {1} old value: {2}"
-                                      .format(inst_name, metric_aggregate[metric],
-                                              metric_cache[inst_name][rate_name][
-                                                  'value']))
-                        metric_cache[inst_name][rate_name] = {
-                            'timestamp': sample_time,
-                            'value': metric_aggregate[metric]}
-                        continue
-                    self.gauge(rate_name, rate_value, dimensions=this_dimensions,
-                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                               hostname=instance_cache.get(inst_name)['hostname'])
-                    self.gauge("vm.{0}".format(rate_name), rate_value,
-                               dimensions=this_dimensions)
-                self.gauge("{0}_total".format(metric), metric_aggregate[metric],
-                           dimensions=this_dimensions,
-                           delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                           hostname=instance_cache.get(inst_name)['hostname'])
-                self.gauge("vm.{0}_total".format(metric),
-                           metric_aggregate[metric],
+        this_dimensions = dict()
+        this_dimensions.update(dims_customer)
+        this_dimensions.update(dims_operations)
+        for metric in metric_aggregate:
+            sample_time = time.time()
+            rate_name = "vm.{0}_total_sec".format(metric)
+            if rate_name not in metric_cache[inst_name]:
+                metric_cache[inst_name][rate_name] = {}
+            else:
+                last_update_time = metric_cache[inst_name][
+                    rate_name]['timestamp']
+                time_diff = sample_time - float(last_update_time)
+                rate_value = self._calculate_rate(metric_aggregate[metric],
+                                                  metric_cache[inst_name][rate_name]['value'],
+                                                  time_diff)
+                if rate_value < 0:
+                    # Bad value, save current reading and skip
+                    self.log.warn("Ignoring negative disk sample for: "
+                                  "{0} new value: {1} old value: {2}"
+                                  .format(inst_name, metric_aggregate[metric],
+                                          metric_cache[inst_name][rate_name][
+                                              'value']))
+                    metric_cache[inst_name][rate_name] = {
+                        'timestamp': sample_time,
+                        'value': metric_aggregate[metric]}
+                    continue
+                self.gauge(rate_name, rate_value,
                            dimensions=this_dimensions)
-                # Save this metric to the cache
-                metric_cache[inst_name][rate_name] = {
-                    'timestamp': sample_time,
-                    'value': metric_aggregate[metric]}
+            self.gauge("vm.{0}_total".format(metric), metric_aggregate[
+                metric], dimensions=this_dimensions)
+            # Save this metric to the cache
+            metric_cache[inst_name][rate_name] = {
+                'timestamp': sample_time,
+                'value': metric_aggregate[metric]}
 
-    def _inspect_disk_info(self, insp, inst, inst_name, instance_cache, metric_cache,
+    def _inspect_disk_info(self, insp, inst, instance_cache, metric_cache,
                            dims_customer, dims_operations):
         """Inspect disk metrics for an instance"""
 
+        inst_name = inst.name()
         metric_aggregate = {}
         for disk in insp.inspect_disk_info(inst):
             disk_dimensions = {'device': disk[0].device}
@@ -515,8 +496,7 @@ class LibvirtCheck(AgentCheck):
                 this_dimensions = disk_dimensions.copy()
                 this_dimensions.update(dims_customer)
                 self.gauge(metric_name, value, dimensions=this_dimensions,
-                           delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                           hostname=instance_cache.get(inst_name)['hostname'])
+                           delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
                 # Operations (metric name prefixed with "vm."
                 this_dimensions = disk_dimensions.copy()
                 this_dimensions.update(dims_operations)
@@ -527,33 +507,27 @@ class LibvirtCheck(AgentCheck):
         this_dimensions.update(dims_customer)
         this_dimensions.update(dims_operations)
         for metric in metric_aggregate:
-            self.gauge("{0}_total".format(metric), metric_aggregate[metric],
-                       dimensions=this_dimensions,
-                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                       hostname=instance_cache.get(inst_name)['hostname'])
-            self.gauge("vm.{0}_total".format(metric),
-                       metric_aggregate[metric],
-                       dimensions=this_dimensions)
+            self.gauge("vm.{0}_total".format(metric), metric_aggregate[
+                metric], dimensions=this_dimensions)
 
-    def _inspect_state(self, insp, inst, inst_name, instance_cache, dims_customer, dims_operations):
+    def _inspect_state(self, insp, inst, instance_cache, dims_customer, dims_operations):
         """Look at the state of the instance, publish a metric using a
            user-friendly description in the 'detail' metadata, and return
            a status code (calibrated to UNIX status codes where 0 is OK)
            so that remaining metrics can be skipped if the VM is not OK
         """
-        inst_state = inst.state()
-        dom_status = inst_state[0] - 1
+        inst_name = inst.name()
+        dom_status = inst.state()[0] - 1
         metatag = None
 
-        if inst_state[0] in DOM_STATES:
-            metatag = {'detail': DOM_STATES[inst_state[0]]}
+        if inst.state()[0] in DOM_STATES:
+            metatag = {'detail': DOM_STATES[inst.state()[0]]}
         # A nova-suspended VM has a SHUTOFF Power State, but alternate Status
-        if inst_state == [libvirt.VIR_DOMAIN_SHUTOFF, 5]:
+        if inst.state() == [libvirt.VIR_DOMAIN_SHUTOFF, 5]:
             metatag = {'detail': 'VM has been suspended'}
 
         self.gauge('host_alive_status', dom_status, dimensions=dims_customer,
                    delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                   hostname=instance_cache.get(inst_name)['hostname'],
                    value_meta=metatag)
         self.gauge('vm.host_alive_status', dom_status,
                    dimensions=dims_operations,
@@ -590,7 +564,7 @@ class LibvirtCheck(AgentCheck):
         instance_cache = self._load_instance_cache()
 
         # Build dimensions for both the customer and for operations
-        dims_base = self._set_dimensions({'service': 'compute', 'component': 'vm'}, instance)
+        dims_base = self._set_dimensions({ 'component': 'vm'}, instance)
 
         # Define aggregate gauges, gauge name to metric name
         agg_gauges = {'vcpus': 'nova.vm.cpu.total_allocated',
@@ -618,6 +592,7 @@ class LibvirtCheck(AgentCheck):
             try:
                 dims_customer = dims_base.copy()
                 dims_customer['resource_id'] = instance_cache.get(inst_name)['instance_uuid']
+		dims_customer['resource_name']=instance_cache.get(inst_name)['hostname']
                 dims_customer['zone'] = instance_cache.get(inst_name)['zone']
                 # Add dimensions that would be helpful for operations
                 dims_operations = dims_customer.copy()
@@ -636,6 +611,7 @@ class LibvirtCheck(AgentCheck):
                             dims_customer[metadata] = metadata_value
                 # Remove customer 'hostname' dimension, this will be replaced by the VM name
                 del(dims_customer['hostname'])
+		del(dims_operations['hostname'])
             except TypeError:
                 # Nova can potentially get into a state where it can't see an
                 # instance, but libvirt can.  This would cause TypeErrors as
@@ -649,7 +625,7 @@ class LibvirtCheck(AgentCheck):
                     agg_values[gauge] += instance_cache.get(inst_name)[gauge]
 
             # Skip further processing on VMs that are not in an active state
-            if self._inspect_state(insp, inst, inst_name, instance_cache,
+            if self._inspect_state(insp, inst, instance_cache,
                                    dims_customer, dims_operations) != 0:
                 continue
 
@@ -668,31 +644,29 @@ class LibvirtCheck(AgentCheck):
                 metric_cache[inst_name] = {}
 
             if self.init_config.get('vm_cpu_check_enable'):
-                self._inspect_cpu(insp, inst, inst_name, instance_cache, metric_cache, dims_customer, dims_operations)
+                self._inspect_cpu(insp, inst, instance_cache, metric_cache, dims_customer, dims_operations)
             if not self._skip_disk_collection:
                 self._last_disk_collect_time = datetime.now()
                 if self.init_config.get('vm_disks_check_enable'):
-                    self._inspect_disks(insp, inst, inst_name, instance_cache, metric_cache, dims_customer,
+                    self._inspect_disks(insp, inst, instance_cache, metric_cache, dims_customer,
                                         dims_operations)
                 if self.init_config.get('vm_extended_disks_check_enable'):
-                    self._inspect_disk_info(insp, inst, inst_name, instance_cache, metric_cache, dims_customer,
+                    self._inspect_disk_info(insp, inst, instance_cache, metric_cache, dims_customer,
                                             dims_operations)
             if self.init_config.get('vm_network_check_enable'):
-                self._inspect_network(insp, inst, inst_name, instance_cache, metric_cache, dims_customer, dims_operations)
+                self._inspect_network(insp, inst, instance_cache, metric_cache, dims_customer, dims_operations)
 
             # Memory utilizaion
             # (req. balloon driver; Linux kernel param CONFIG_VIRTIO_BALLOON)
             try:
-                mem_stats = inst.memoryStats()
-                mem_metrics = {'mem.free_mb': float(mem_stats['unused']) / 1024,
-                               'mem.swap_used_mb': float(mem_stats['swap_out']) / 1024,
-                               'mem.total_mb': float(mem_stats['available']) / 1024,
-                               'mem.used_mb': float(mem_stats['available'] - mem_stats['unused']) / 1024,
-                               'mem.free_perc': float(mem_stats['unused']) / float(mem_stats['available']) * 100}
+                mem_metrics = {'mem.free_mb': float(inst.memoryStats()['unused']) / 1024,
+                               'mem.swap_used_mb': float(inst.memoryStats()['swap_out']) / 1024,
+                               'mem.total_mb': float(inst.memoryStats()['available'] - inst.memoryStats()['unused']) / 1024,
+                               'mem.used_mb': float(inst.memoryStats()['available'] - inst.memoryStats()['unused']) / 1024,
+                               'mem.free_perc': float(inst.memoryStats()['unused']) / float(inst.memoryStats()['available']) * 100}
                 for name in mem_metrics:
                     self.gauge(name, mem_metrics[name], dimensions=dims_customer,
-                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                               hostname=instance_cache.get(inst_name)['hostname'])
+                               delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
                     self.gauge("vm.{0}".format(name), mem_metrics[name],
                                dimensions=dims_operations)
                 memory_info = insp.inspect_memory_resident(inst)
@@ -718,8 +692,7 @@ class LibvirtCheck(AgentCheck):
                                                   stdout=fnull,
                                                   stderr=fnull)
                             self.gauge('ping_status', res, dimensions=dims_customer_ip,
-                                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'],
-                                       hostname=instance_cache.get(inst_name)['hostname'])
+                                       delegated_tenant=instance_cache.get(inst_name)['tenant_id'])
                             self.gauge('vm.ping_status', res, dimensions=dims_operations_ip)
                         except OSError as e:
                             self.log.warn("OS error running '{0}' returned {1}".format(ping_cmd, e))
