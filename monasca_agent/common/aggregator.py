@@ -146,7 +146,7 @@ class MetricsAggregator(object):
         """
         if 'hostname' not in dimensions and hostname and 'resource_name' not in dimensions:
             dimensions.update({'hostname': hostname})
-		if 'resource_name' in dimensions:
+        if 'resource_name' in dimensions:
 			dimensions.update({'servername': hostname})
         if device_name:
             dimensions.update({'device': device_name})
